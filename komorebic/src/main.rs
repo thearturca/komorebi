@@ -607,6 +607,7 @@ struct ActiveWindowBorderOffset {
 }
 
 #[derive(Parser, AhkFunction)]
+#[allow(clippy::struct_excessive_bools)]
 struct Start {
     /// Allow the use of komorebi's custom focus-follows-mouse implementation
     #[clap(action, short, long = "ffm")]
@@ -621,6 +622,16 @@ struct Start {
     #[clap(action, short, long)]
     tcp_port: Option<usize>,
     /// Start whkd in a background process
+    #[clap(action, long)]
+    whkd: bool,
+    /// Start autohotkey configuration file
+    #[clap(action, long)]
+    ahk: bool,
+}
+
+#[derive(Parser, AhkFunction)]
+struct Stop {
+    /// Stop whkd if it is running as a background process
     #[clap(action, long)]
     whkd: bool,
 }
@@ -695,7 +706,7 @@ enum SubCommand {
     /// Start komorebi.exe as a background process
     Start(Start),
     /// Stop the komorebi.exe process and restore all hidden windows
-    Stop,
+    Stop(Stop),
     /// Output various important komorebi-related environment values
     Check,
     /// Show a JSON representation of the current window manager state
@@ -1391,8 +1402,20 @@ fn main() -> Result<()> {
             )?;
         }
         SubCommand::Start(arg) => {
+            let mut ahk: String = String::from("autohotkey.exe");
+
+            if let Ok(komorebi_ahk_exe) = std::env::var("KOMOREBI_AHK_EXE") {
+                if which(&komorebi_ahk_exe).is_ok() {
+                    ahk = komorebi_ahk_exe;
+                }
+            }
+
             if arg.whkd && which("whkd").is_err() {
                 return Err(anyhow!("could not find whkd, please make sure it is installed before using the --whkd flag"));
+            }
+
+            if arg.ahk && which(&ahk).is_err() {
+                return Err(anyhow!("could not find autohotkey, please make sure it is installed before using the --ahk flag"));
             }
 
             let mut buf: PathBuf;
@@ -1429,7 +1452,7 @@ fn main() -> Result<()> {
                     "'--config=\"{}\"'",
                     path.as_os_str()
                         .to_string_lossy()
-                        .trim_start_matches(r#"\\?\"#),
+                        .trim_start_matches(r"\\?\"),
                 ));
             }
 
@@ -1445,8 +1468,13 @@ fn main() -> Result<()> {
                 flags.push(format!("'--tcp-port={port}'"));
             }
 
-            let argument_list = flags.join(",");
-            let script = {
+            let script = if flags.is_empty() {
+                format!(
+                    "Start-Process '{}' -WindowStyle hidden",
+                    exec.unwrap_or("komorebi.exe")
+                )
+            } else {
+                let argument_list = flags.join(",");
                 format!(
                     "Start-Process '{}' -ArgumentList {argument_list} -WindowStyle hidden",
                     exec.unwrap_or("komorebi.exe")
@@ -1495,8 +1523,44 @@ if (!(Get-Process whkd -ErrorAction SilentlyContinue))
                     }
                 }
             }
+
+            if arg.ahk {
+                let home = HOME_DIR.clone();
+                let mut config_ahk = home;
+                config_ahk.push("komorebi.ahk");
+
+                let script = format!(
+                    r#"
+  Start-Process {ahk} {config} -WindowStyle hidden
+                "#,
+                    config = config_ahk.as_os_str().to_string_lossy()
+                );
+
+                match powershell_script::run(&script) {
+                    Ok(_) => {
+                        println!("{script}");
+                    }
+                    Err(error) => {
+                        println!("Error: {error}");
+                    }
+                }
+            }
         }
-        SubCommand::Stop => {
+        SubCommand::Stop(arg) => {
+            if arg.whkd {
+                let script = r#"
+Stop-Process -Name:whkd -ErrorAction SilentlyContinue
+                "#;
+                match powershell_script::run(script) {
+                    Ok(_) => {
+                        println!("{script}");
+                    }
+                    Err(error) => {
+                        println!("Error: {error}");
+                    }
+                }
+            }
+
             send_message(&SocketMessage::Stop.as_bytes()?)?;
         }
         SubCommand::FloatRule(arg) => {

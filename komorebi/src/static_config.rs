@@ -34,6 +34,7 @@ use hotwatch::Hotwatch;
 use komorebi_core::config_generation::ApplicationConfigurationGenerator;
 use komorebi_core::config_generation::ApplicationOptions;
 use komorebi_core::config_generation::IdWithIdentifier;
+use komorebi_core::config_generation::MatchingStrategy;
 use komorebi_core::ApplicationIdentifier;
 use komorebi_core::DefaultLayout;
 use komorebi_core::FocusFollowsMouseImplementation;
@@ -139,6 +140,7 @@ impl From<&Workspace> for WorkspaceConfig {
                 let rule = IdWithIdentifier {
                     kind: ApplicationIdentifier::Exe,
                     id: identifier.clone(),
+                    matching_strategy: None,
                 };
 
                 if *is_initial {
@@ -250,12 +252,18 @@ pub struct StaticConfig {
     /// Path to applications.yaml from komorebi-application-specific-configurations (default: None)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_specific_configuration_path: Option<PathBuf>,
-    /// Width of the active window border (default: 20)
+    /// DEPRECATED from v0.1.19: use active_window_border_width instead
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border_width: Option<i32>,
-    /// Offset of the active window border (default: None)
+    /// DEPRECATED from v0.1.19: use active_window_border_offset instead
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border_offset: Option<Rect>,
+    /// Width of the active window border (default: 20)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_window_border_width: Option<i32>,
+    /// Offset of the active window border (default: None)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_window_border_offset: Option<i32>,
     /// Display an active window border (default: false)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_window_border: Option<bool>,
@@ -396,8 +404,12 @@ impl From<&WindowManager> for StaticConfig {
             focus_follows_mouse: value.focus_follows_mouse,
             mouse_follows_focus: Option::from(value.mouse_follows_focus),
             app_specific_configuration_path: None,
-            border_width: Option::from(BORDER_WIDTH.load(Ordering::SeqCst)),
-            border_offset: *BORDER_OFFSET.lock(),
+            active_window_border_width: Option::from(BORDER_WIDTH.load(Ordering::SeqCst)),
+            active_window_border_offset: BORDER_OFFSET
+                .lock()
+                .map_or(None, |offset| Option::from(offset.left)),
+            border_width: None,
+            border_offset: None,
             active_window_border: Option::from(BORDER_ENABLED.load(Ordering::SeqCst)),
             active_window_border_colours: border_colours,
             default_workspace_padding: Option::from(
@@ -423,7 +435,7 @@ impl From<&WindowManager> for StaticConfig {
 
 impl StaticConfig {
     #[allow(clippy::cognitive_complexity, clippy::too_many_lines)]
-    fn apply_globals(&self) -> Result<()> {
+    fn apply_globals(&mut self) -> Result<()> {
         if let Some(monitor_index_preferences) = &self.monitor_index_preferences {
             let mut preferences = MONITOR_INDEX_PREFERENCES.lock();
             *preferences = monitor_index_preferences.clone();
@@ -446,14 +458,31 @@ impl StaticConfig {
             DEFAULT_WORKSPACE_PADDING.store(workspace, Ordering::SeqCst);
         }
 
-        if let Some(width) = self.border_width {
-            BORDER_WIDTH.store(width, Ordering::SeqCst);
-        }
+        self.active_window_border_width.map_or_else(
+            || {
+                BORDER_WIDTH.store(20, Ordering::SeqCst);
+            },
+            |width| {
+                BORDER_WIDTH.store(width, Ordering::SeqCst);
+            },
+        );
+        self.active_window_border_offset.map_or_else(
+            || {
+                let mut border_offset = BORDER_OFFSET.lock();
+                *border_offset = None;
+            },
+            |offset| {
+                let new_border_offset = Rect {
+                    left: offset,
+                    top: offset,
+                    right: offset * 2,
+                    bottom: offset * 2,
+                };
 
-        if let Some(offset) = self.border_offset {
-            let mut border_offset = BORDER_OFFSET.lock();
-            *border_offset = Some(offset);
-        }
+                let mut border_offset = BORDER_OFFSET.lock();
+                *border_offset = Some(new_border_offset);
+            },
+        );
 
         if let Some(colours) = &self.active_window_border_colours {
             BORDER_COLOUR_SINGLE.store(
@@ -481,10 +510,14 @@ impl StaticConfig {
         let mut object_name_change_identifiers = OBJECT_NAME_CHANGE_ON_LAUNCH.lock();
         let mut layered_identifiers = LAYERED_WHITELIST.lock();
 
-        if let Some(float) = &self.float_rules {
+        if let Some(float) = &mut self.float_rules {
             for identifier in float {
-                if !float_identifiers.contains(&identifier.id) {
-                    float_identifiers.push(identifier.id.clone());
+                if identifier.matching_strategy.is_none() {
+                    identifier.matching_strategy = Option::from(MatchingStrategy::Legacy);
+                }
+
+                if !float_identifiers.contains(identifier) {
+                    float_identifiers.push(identifier.clone());
                 }
             }
         }
@@ -542,8 +575,14 @@ impl StaticConfig {
             for entry in asc {
                 if let Some(float) = entry.float_identifiers {
                     for f in float {
-                        if !float_identifiers.contains(&f.id) {
-                            float_identifiers.push(f.id.clone());
+                        let mut without_comment: IdWithIdentifier = f.into();
+                        if without_comment.matching_strategy.is_none() {
+                            without_comment.matching_strategy =
+                                Option::from(MatchingStrategy::Legacy);
+                        }
+
+                        if !float_identifiers.contains(&without_comment) {
+                            float_identifiers.push(without_comment.clone());
                         }
                     }
                 }
@@ -593,7 +632,7 @@ impl StaticConfig {
         incoming: Arc<Mutex<Receiver<WindowManagerEvent>>>,
     ) -> Result<WindowManager> {
         let content = std::fs::read_to_string(path)?;
-        let value: Self = serde_json::from_str(&content)?;
+        let mut value: Self = serde_json::from_str(&content)?;
         value.apply_globals()?;
 
         let socket = DATA_DIR.join("komorebi.sock");
@@ -713,7 +752,7 @@ impl StaticConfig {
 
     pub fn reload(path: &PathBuf, wm: &mut WindowManager) -> Result<()> {
         let content = std::fs::read_to_string(path)?;
-        let value: Self = serde_json::from_str(&content)?;
+        let mut value: Self = serde_json::from_str(&content)?;
 
         value.apply_globals()?;
 

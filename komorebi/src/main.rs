@@ -45,6 +45,9 @@ use winreg::enums::HKEY_CURRENT_USER;
 use winreg::RegKey;
 
 use crate::hidden::Hidden;
+use komorebi_core::config_generation::IdWithIdentifier;
+use komorebi_core::config_generation::MatchingStrategy;
+use komorebi_core::ApplicationIdentifier;
 use komorebi_core::HidingBehaviour;
 use komorebi_core::Rect;
 use komorebi_core::SocketMessage;
@@ -107,11 +110,19 @@ lazy_static! {
     static ref WORKSPACE_RULES: Arc<Mutex<HashMap<String, WorkspaceRule>>> =
         Arc::new(Mutex::new(HashMap::new()));
     static ref MANAGE_IDENTIFIERS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![]));
-    static ref FLOAT_IDENTIFIERS: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![
+    static ref FLOAT_IDENTIFIERS: Arc<Mutex<Vec<IdWithIdentifier>>> = Arc::new(Mutex::new(vec![
         // mstsc.exe creates these on Windows 11 when a WSL process is launched
         // https://github.com/LGUG2Z/komorebi/issues/74
-        "OPContainerClass".to_string(),
-        "IHWindowClass".to_string()
+        IdWithIdentifier {
+            kind: ApplicationIdentifier::Class,
+            id: String::from("OPContainerClass"),
+            matching_strategy: Option::from(MatchingStrategy::Equals),
+        },
+        IdWithIdentifier {
+            kind: ApplicationIdentifier::Class,
+            id: String::from("IHWindowClass"),
+            matching_strategy: Option::from(MatchingStrategy::Equals),
+        }
     ]));
     static ref PERMAIGNORE_CLASSES: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec![
         "Chrome_RenderWidgetHostHWND".to_string(),
@@ -319,7 +330,7 @@ pub fn current_virtual_desktop() -> Option<Vec<u8>> {
     // This is the path on Windows 11
     if current.is_none() {
         current = hkcu
-            .open_subkey(r#"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops"#)
+            .open_subkey(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops")
             .ok()
             .and_then(
                 |desktops| match desktops.get_raw_value("CurrentVirtualDesktop") {
@@ -358,7 +369,7 @@ pub struct Notification {
 pub fn notify_subscribers(notification: &str) -> Result<()> {
     let mut stale_subscriptions = vec![];
     let mut subscriptions = SUBSCRIPTION_PIPES.lock();
-    for (subscriber, pipe) in subscriptions.iter_mut() {
+    for (subscriber, pipe) in &mut *subscriptions {
         match writeln!(pipe, "{notification}") {
             Ok(_) => {
                 tracing::debug!("pushed notification to subscriber: {}", subscriber);
