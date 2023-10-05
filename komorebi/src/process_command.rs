@@ -46,6 +46,9 @@ use crate::windows_api::WindowsApi;
 use crate::Notification;
 use crate::NotificationEvent;
 use crate::ALT_FOCUS_HACK;
+use crate::ANIMATE_DURATION;
+use crate::ANIMATE_EASE;
+use crate::ANIMATE_ENABLED;
 use crate::BORDER_COLOUR_CURRENT;
 use crate::BORDER_COLOUR_MONOCLE;
 use crate::BORDER_COLOUR_SINGLE;
@@ -1069,6 +1072,15 @@ impl WindowManager {
                     self.hide_border()?;
                 }
             }
+            SocketMessage::Animate(enable) => {
+                ANIMATE_ENABLED.store(enable, Ordering::SeqCst);
+            }
+            SocketMessage::AnimateDuration(duration) => {
+                ANIMATE_DURATION.store(duration, Ordering::SeqCst);
+            }
+            SocketMessage::AnimateEase(ease) => {
+                *ANIMATE_EASE.lock() = ease;
+            }
             SocketMessage::ActiveWindowBorderColour(kind, r, g, b) => {
                 match kind {
                     WindowKind::Single => {
@@ -1223,7 +1235,7 @@ impl WindowManager {
             | SocketMessage::CycleMoveWindow(_)
             | SocketMessage::MoveWindow(_) => {
                 let foreground = WindowsApi::foreground_window()?;
-                let foreground_window = Window { hwnd: foreground };
+                let foreground_window = Window::new(foreground);
                 let mut rect = WindowsApi::window_rect(foreground_window.hwnd())?;
                 rect.top -= self.invisible_borders.bottom;
                 rect.bottom += self.invisible_borders.bottom;
